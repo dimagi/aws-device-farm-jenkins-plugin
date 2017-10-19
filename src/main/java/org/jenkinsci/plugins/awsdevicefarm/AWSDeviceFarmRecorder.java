@@ -14,6 +14,12 @@
 //
 package org.jenkinsci.plugins.awsdevicefarm;
 
+import java.io.*;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
 import com.amazonaws.auth.BasicAWSCredentials;
 import com.amazonaws.services.devicefarm.model.Artifact;
 import com.amazonaws.services.devicefarm.model.ArtifactCategory;
@@ -38,11 +44,7 @@ import hudson.EnvVars;
 import hudson.Extension;
 import hudson.FilePath;
 import hudson.Launcher;
-import hudson.model.AbstractBuild;
-import hudson.model.AbstractProject;
-import hudson.model.Action;
-import hudson.model.BuildListener;
-import hudson.model.Result;
+import hudson.model.*;
 import hudson.tasks.BuildStepDescriptor;
 import hudson.tasks.BuildStepMonitor;
 import hudson.tasks.Publisher;
@@ -51,6 +53,8 @@ import hudson.util.FormValidation;
 import hudson.util.IOUtils;
 import hudson.util.ListBoxModel;
 import net.sf.json.JSONObject;
+import javax.annotation.Nonnull;
+import jenkins.tasks.SimpleBuildStep;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.plugins.awsdevicefarm.test.AppiumJavaJUnitTest;
@@ -87,7 +91,7 @@ import java.util.Map;
 /**
  * Post-build step for running tests on AWS Device Farm.
  */
-public class AWSDeviceFarmRecorder extends Recorder {
+public class AWSDeviceFarmRecorder extends Recorder implements SimpleBuildStep {
 
     ////// All of these fields have to be public so that they can be read (via reflection) by Jenkins. Probably not the
     ////// greatest thing in the world given that this is *allegedly* supposed to be an immutable class.
@@ -97,6 +101,7 @@ public class AWSDeviceFarmRecorder extends Recorder {
     public String devicePoolName;
     public String appArtifact;
     public String runName;
+    public String locale;
 
     //// config.jelly fields
     // Radio Button Selection
@@ -242,6 +247,7 @@ public class AWSDeviceFarmRecorder extends Recorder {
                                  String devicePoolName,
                                  String appArtifact,
                                  String runName,
+                                 String locale,
                                  String testToRun,
                                  Boolean storeResults,
                                  Boolean isRunUnmetered,
@@ -287,6 +293,8 @@ public class AWSDeviceFarmRecorder extends Recorder {
         this.devicePoolName = devicePoolName;
         this.appArtifact = appArtifact;
         this.runName = runName;
+        this.locale = locale;
+        this.testToRun = testToRun;
         this.storeResults = storeResults;
         this.isRunUnmetered = isRunUnmetered;
         this.eventCount = eventCount;
@@ -391,31 +399,29 @@ public class AWSDeviceFarmRecorder extends Recorder {
      * @throws InterruptedException
      */
     @Override
-    public boolean perform(AbstractBuild build, Launcher launcher, BuildListener listener) throws IOException, InterruptedException {
+    public void perform(@Nonnull hudson.model.Run<?, ?> build, @Nonnull FilePath workspace, @Nonnull Launcher launcher, @Nonnull TaskListener listener) throws IOException, InterruptedException {
         // Check if the build result set from a previous build step.
         // A null build result indicates that the build is still ongoing and we're
         // likely being run as a build step by the "Any Build Step Plugin".
         Result buildResult = build.getResult();
         if (buildResult != null && buildResult.isWorseOrEqualTo(Result.FAILURE)) {
-            return false;
+            listener.error("Still building");
         }
 
         EnvVars env = build.getEnvironment(listener);
-        Map<String, String> parameters = build.getBuildVariables();
+        Map<String, String> parameters = build.getEnvironment(listener);
 
         log = listener.getLogger();
 
         // Artifacts location for this build on master.
         FilePath artifactsDir = new FilePath(build.getArtifactsDir());
 
-        // Workspace (potentially remote if using slave).
-        FilePath workspace = build.getWorkspace();
 
         // Validate user selection & input values.
         boolean isValid = validateConfiguration() && validateTestConfiguration();
         if (!isValid) {
             writeToLog("Invalid configuration.");
-            return false;
+            return;
         }
 
         // Create & configure the AWSDeviceFarm client.
@@ -424,7 +430,6 @@ public class AWSDeviceFarmRecorder extends Recorder {
                 .withWorkspace(workspace)
                 .withArtifactsDir(artifactsDir)
                 .withEnv(env);
-
         try {
             // Accept 'ADF_PROJECT' build parameter as an overload from job configuration.
             String projectNameParameter = parameters.get("AWSDEVICEFARM_PROJECT");
@@ -452,6 +457,10 @@ public class AWSDeviceFarmRecorder extends Recorder {
             if (devicePoolParameter != null) {
                 writeToLog(String.format("Using overloaded device pool '%s' from build parameters", devicePoolParameter));
                 devicePoolName = devicePoolParameter;
+            }
+            
+            if (StringUtils.isBlank(locale)) {
+                locale = "en_US";
             }
 
             // Get AWS Device Farm device pool from user provided name.
@@ -510,7 +519,7 @@ public class AWSDeviceFarmRecorder extends Recorder {
             TestType testType = TestType.fromValue(testToSchedule.getType());
             writeToLog(String.format("Scheduling '%s' run '%s'", testType, deviceFarmRunName));
 
-            ScheduleRunConfiguration configuration = getScheduleRunConfiguration(isRunUnmetered, deviceLocation, radioDetails);
+            ScheduleRunConfiguration configuration = getScheduleRunConfiguration(isRunUnmetered, deviceLocation, radioDetails, locale);
             configuration.setExtraDataPackageArn(extraDataArn);
 
             ScheduleRunResult run = adf.scheduleRun(project.getArn(), deviceFarmRunName, appArn, devicePool.getArn(), testToSchedule, jobTimeoutMinutes, configuration);
@@ -564,10 +573,10 @@ public class AWSDeviceFarmRecorder extends Recorder {
             build.setResult(action.getBuildResult(ignoreRunError));
         } catch (AWSDeviceFarmException e) {
             writeToLog(e.getMessage());
-            return false;
+            return;
         }
 
-        return true;
+        return;
     }
 
     private Location getScheduleRunConfigurationLocation(Boolean deviceLocation) {
@@ -601,7 +610,7 @@ public class AWSDeviceFarmRecorder extends Recorder {
 
     }
 
-    private ScheduleRunConfiguration getScheduleRunConfiguration(Boolean isRunUnmetered, Boolean deviceLocation, Boolean radioDetails) {
+    private ScheduleRunConfiguration getScheduleRunConfiguration(Boolean isRunUnmetered, Boolean deviceLocation, Boolean radioDetails, String locale) {
         ScheduleRunConfiguration configuration = new ScheduleRunConfiguration();
         if (isRunUnmetered != null && isRunUnmetered) {
             configuration.setBillingMethod(BillingMethod.UNMETERED);
@@ -611,7 +620,8 @@ public class AWSDeviceFarmRecorder extends Recorder {
 
         // set a bunch of other default values as Device Farm expect these
         configuration.setAuxiliaryApps(new ArrayList<String>());
-        configuration.setLocale("en_US");
+        configuration.setExtraDataPackageArn(null);
+        configuration.setLocale(locale);
 
         Location location = getScheduleRunConfigurationLocation(deviceLocation);
         configuration.setLocation(location);

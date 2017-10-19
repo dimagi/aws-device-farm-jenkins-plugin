@@ -17,6 +17,7 @@ package org.jenkinsci.plugins.awsdevicefarm;
 import hudson.Functions;
 import hudson.model.AbstractBuild;
 import hudson.model.Run;
+import hudson.util.Graph;
 import hudson.util.Area;
 import hudson.util.ChartUtil.NumberOnlyBuildLabel;
 import hudson.util.DataSetBuilder;
@@ -123,7 +124,6 @@ public class AWSDeviceFarmGraph extends Graph {
 
         for (AWSDeviceFarmTestResult result : results) {
             Run<?, ?> build = result.getOwner();
-
             // Create label for this result using its Jenkins build number.
             NumberOnlyBuildLabel label = new NumberOnlyBuildLabel(build);
 
