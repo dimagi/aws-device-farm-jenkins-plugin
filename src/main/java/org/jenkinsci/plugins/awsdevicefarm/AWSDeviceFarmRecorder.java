@@ -513,6 +513,10 @@ public class AWSDeviceFarmRecorder extends Recorder implements SimpleBuildStep {
                 writeToLog(String.format("Using Extra Data '%s'", env.expand(extraDataArtifact)));
                 Upload extraDataUpload = adf.uploadExtraData(project, extraDataArtifact);
                 extraDataArn = extraDataUpload.getArn();
+            } else {
+                writeToLog(String.format("NOT using Extra Data '%s' with boolean '%s'",
+                        env.expand(extraDataArtifact),
+                        extraData));
             }
 
             // Schedule test run.
